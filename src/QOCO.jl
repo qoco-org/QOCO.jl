@@ -6,13 +6,7 @@ using QOCO_jll
 using SparseArrays
 using LinearAlgebra
 
-# Global library handle, initialized in __init__
-const qoco = Ref{String}()
-
-function __init__()
-    qoco[] = QOCO_jll.qoco
-    return
-end
+const libqoco = QOCO_jll.qoco
 
 include("c_api.jl")
 include("MOI_wrapper/MOI_wrapper.jl")
