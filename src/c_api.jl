@@ -122,7 +122,7 @@ Populate `settings` with QOCO's compiled-in defaults.
 """
 function set_default_settings!(settings::QOCOSettings)
     ccall(
-        (:set_default_settings, qoco[]),
+        (:set_default_settings, libqoco),
         Cvoid,
         (Ref{QOCOSettings},),
         settings,
@@ -146,7 +146,7 @@ function qoco_set_csc!(
     Ax::Vector{QOCOFloat}, Ap::Vector{QOCOInt}, Ai::Vector{QOCOInt},
 )
     ccall(
-        (:qoco_set_csc, qoco[]),
+        (:qoco_set_csc, libqoco),
         Cvoid,
         (Ref{QOCOCscMatrix}, QOCOInt, QOCOInt, QOCOInt,
          Ptr{QOCOFloat}, Ptr{QOCOInt}, Ptr{QOCOInt}),
@@ -172,7 +172,7 @@ function qoco_setup!(
     settings::QOCOSettings,
 )
     return ccall(
-        (:qoco_setup, qoco[]),
+        (:qoco_setup, libqoco),
         QOCOInt,
         (Ptr{QOCOSolver}, QOCOInt, QOCOInt, QOCOInt,
          Ref{QOCOCscMatrix}, Ptr{QOCOFloat},
@@ -193,7 +193,7 @@ Run the solver. Returns `QOCOInt` solve status.
 """
 function qoco_solve!(solver_ptr::Ptr{QOCOSolver})
     return ccall(
-        (:qoco_solve, qoco[]),
+        (:qoco_solve, libqoco),
         QOCOInt,
         (Ptr{QOCOSolver},),
         solver_ptr,
@@ -208,7 +208,7 @@ itself.  Do not use `solver_ptr` after this call.
 """
 function qoco_cleanup!(solver_ptr::Ptr{QOCOSolver})
     return ccall(
-        (:qoco_cleanup, qoco[]),
+        (:qoco_cleanup, libqoco),
         QOCOInt,
         (Ptr{QOCOSolver},),
         solver_ptr,
@@ -222,7 +222,7 @@ Update solver settings after setup.
 """
 function qoco_update_settings!(solver_ptr::Ptr{QOCOSolver}, settings::QOCOSettings)
     return ccall(
-        (:qoco_update_settings, qoco[]),
+        (:qoco_update_settings, libqoco),
         QOCOInt,
         (Ptr{QOCOSolver}, Ref{QOCOSettings}),
         solver_ptr, settings,
@@ -242,7 +242,7 @@ function qoco_update_vector_data!(
     h::Union{Vector{QOCOFloat}, Ptr{Nothing}},
 )
     ccall(
-        (:qoco_update_vector_data, qoco[]),
+        (:qoco_update_vector_data, libqoco),
         Cvoid,
         (Ptr{QOCOSolver}, Ptr{QOCOFloat}, Ptr{QOCOFloat}, Ptr{QOCOFloat}),
         solver_ptr, c, b, h,
@@ -263,7 +263,7 @@ function qoco_update_matrix_data!(
     Gx::Union{Vector{QOCOFloat}, Ptr{Nothing}},
 )
     ccall(
-        (:qoco_update_matrix_data, qoco[]),
+        (:qoco_update_matrix_data, libqoco),
         Cvoid,
         (Ptr{QOCOSolver}, Ptr{QOCOFloat}, Ptr{QOCOFloat}, Ptr{QOCOFloat}),
         solver_ptr, Px, Ax, Gx,
