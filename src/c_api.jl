@@ -1,4 +1,4 @@
-# Thin Julia wrapper over the QOCO C API (QOCO_jll v0.1.6)
+# Thin Julia wrapper over the QOCO C API (QOCO_jll v0.3.2)
 
 # Type aliases matching definitions.h
 const QOCOInt = Cint
@@ -50,10 +50,12 @@ Note: `verbose` is `unsigned char` in C (mapped to `UInt8`).
 """
 mutable struct QOCOSettings
     max_iters::QOCOInt
-    bisect_iters::QOCOInt
     ruiz_iters::QOCOInt
-    iter_ref_iters::QOCOInt
-    kkt_static_reg::QOCOFloat
+    max_ir_iters::QOCOInt
+    ir_tol::QOCOFloat
+    kkt_static_reg_P::QOCOFloat
+    kkt_static_reg_A::QOCOFloat
+    kkt_static_reg_G::QOCOFloat
     kkt_dynamic_reg::QOCOFloat
     abstol::QOCOFloat
     reltol::QOCOFloat
@@ -66,7 +68,6 @@ end
     QOCOSolution
 
 Solution struct matching `QOCOSolution` in `structs.h`.
-Field order: x, s, y, z, iters, setup_time_sec, solve_time_sec, obj, pres, dres, gap, status.
 """
 struct QOCOSolution
     x::Ptr{QOCOFloat}
@@ -74,8 +75,10 @@ struct QOCOSolution
     y::Ptr{QOCOFloat}
     z::Ptr{QOCOFloat}
     iters::QOCOInt
+    ir_iters::QOCOInt
     setup_time_sec::QOCOFloat
     solve_time_sec::QOCOFloat
+    analysis_time_sec::QOCOFloat
     obj::QOCOFloat
     pres::QOCOFloat
     dres::QOCOFloat
@@ -86,7 +89,7 @@ end
 """
     QOCOSolver
 
-Top-level solver handle matching `QOCOSolver` in `structs.h` (v0.1.6).
+Top-level solver handle matching `QOCOSolver` in `structs.h`.
 
 Because `qoco_cleanup` calls `qoco_free(solver)` (freeing the solver struct
 itself), we must allocate the solver with C's malloc so C can free it safely.
@@ -96,6 +99,8 @@ Use `qoco_solver_alloc()` to create a solver and pass the returned
 struct QOCOSolver
     settings::Ptr{QOCOSettings}
     work::Ptr{Cvoid}         # QOCOWorkspace*, opaque
+    linsys::Ptr{Cvoid}       # LinSysBackend*, opaque
+    linsys_data::Ptr{Cvoid}  # LinSysData*, opaque
     sol::Ptr{QOCOSolution}
 end
 
@@ -130,9 +135,58 @@ function set_default_settings!(settings::QOCOSettings)
     return settings
 end
 
-function default_settings()
-    s = QOCOSettings(0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0x00)
+"""
+    c_default_settings() -> QOCOSettings
+
+Return a fresh `QOCOSettings` filled in with QOCO's own compiled-in defaults,
+with none of QOCO.jl's overrides applied. Use [`default_settings`](@ref) for the
+settings the wrapper actually solves with.
+"""
+function c_default_settings()
+    s = QOCOSettings(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0x00)
     set_default_settings!(s)
+    return s
+end
+
+"""
+    SETTING_OVERRIDES
+
+Settings where QOCO.jl deliberately departs from the values QOCO compiles in.
+
+QOCO 0.3.0 (commit `b8c1936`, "Robustness improvements") split the single
+`kkt_static_reg` into per-block values and lowered the `P` block from `1e-8` to
+`1e-13`. When the objective has no quadratic term the (1,1) block of the KKT
+system *is* that regularization and nothing else, so on problems whose
+constraints are additionally rank deficient the KKT matrix becomes numerically
+singular. The interior point steps then stop correcting the primal residual —
+it freezes orders of magnitude above the tolerance while the duality gap keeps
+shrinking — and the solve reports `QOCO_NUMERICAL_ERROR` despite having found
+the right objective.
+
+Restoring the pre-0.3.0 value repairs every such case observed, in both linear
+and second-order-cone problems, and leaves well-conditioned problems unchanged.
+`kkt_static_reg_G` and `kkt_dynamic_reg` were lowered by the same commit, but
+neither is needed to recover the old behaviour, so both are left at QOCO's
+values to keep this divergence as small as possible.
+
+Individual settings can still be overridden per-solve through
+`MOI.RawOptimizerAttribute`, which takes precedence over this table. Remove this
+once QOCO ships a fix upstream.
+"""
+const SETTING_OVERRIDES = (kkt_static_reg_P = 1e-8,)
+
+"""
+    default_settings() -> QOCOSettings
+
+Return the settings QOCO.jl solves with: QOCO's compiled-in defaults with
+[`SETTING_OVERRIDES`](@ref) applied on top. See that constant for why the
+wrapper does not simply use QOCO's values.
+"""
+function default_settings()
+    s = c_default_settings()
+    for (key, value) in pairs(SETTING_OVERRIDES)
+        setfield!(s, key, convert(fieldtype(QOCOSettings, key), value))
+    end
     return s
 end
 
@@ -227,6 +281,28 @@ function qoco_update_settings!(solver_ptr::Ptr{QOCOSolver}, settings::QOCOSettin
         (Ptr{QOCOSolver}, Ref{QOCOSettings}),
         solver_ptr, settings,
     )
+end
+
+"""
+    qoco_set_x0!(solver_ptr, x0)
+
+Set an optional primal starting point after `qoco_setup!`. `x0` must have
+length `n` and be given in the original, unequilibrated problem scaling. QOCO
+copies the vector, so it does not need to be kept alive afterwards. Pass
+`C_NULL` to clear a previously set starting point and fall back to the default
+initialisation.
+"""
+function qoco_set_x0!(
+    solver_ptr::Ptr{QOCOSolver},
+    x0::Union{Vector{QOCOFloat}, Ptr{Nothing}},
+)
+    ccall(
+        (:qoco_set_x0, libqoco),
+        Cvoid,
+        (Ptr{QOCOSolver}, Ptr{QOCOFloat}),
+        solver_ptr, x0,
+    )
+    return
 end
 
 """

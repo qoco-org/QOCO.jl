@@ -103,19 +103,32 @@ optimizer = QOCO.Optimizer(; max_iters = 500, abstol = 1e-8)
 MOI.set(optimizer, MOI.RawOptimizerAttribute("max_iters"), 500)
 ```
 
-| Parameter         | Type    | Default  | Description                         |
-|-------------------|---------|----------|-------------------------------------|
-| `max_iters`       | Int     | 200      | Maximum number of iterations        |
-| `bisect_iters`    | Int     | 5        | Bisection iterations                |
-| `ruiz_iters`      | Int     | 0        | Ruiz equilibration iterations       |
-| `iter_ref_iters`  | Int     | 1        | Iterative refinement iterations     |
-| `kkt_static_reg`  | Float64 | 1e-8     | KKT static regularization           |
-| `kkt_dynamic_reg` | Float64 | 1e-8     | KKT dynamic regularization          |
-| `abstol`          | Float64 | 1e-7     | Absolute tolerance                  |
-| `reltol`          | Float64 | 1e-7     | Relative tolerance                  |
-| `abstol_inacc`    | Float64 | 1e-5     | Absolute tolerance (inaccurate)     |
-| `reltol_inacc`    | Float64 | 1e-5     | Relative tolerance (inaccurate)     |
-| `verbose`         | Bool    | false    | Print solver output                 |
+| Parameter           | Type    | Default  | Description                                   |
+|---------------------|---------|----------|-----------------------------------------------|
+| `max_iters`         | Int     | 200      | Maximum number of iterations                  |
+| `ruiz_iters`        | Int     | 0        | Ruiz equilibration iterations                 |
+| `max_ir_iters`      | Int     | 5        | Maximum iterative refinement iterations       |
+| `ir_tol`            | Float64 | 1e-6     | Iterative refinement stopping tolerance       |
+| `kkt_static_reg_P`  | Float64 | 1e-8 †   | KKT static regularization, (1,1) `P` block    |
+| `kkt_static_reg_A`  | Float64 | 1e-8     | KKT static regularization, (2,2) `A` block    |
+| `kkt_static_reg_G`  | Float64 | 1e-13    | KKT static regularization, (3,3) `G` block    |
+| `kkt_dynamic_reg`   | Float64 | 1e-11    | KKT dynamic regularization                    |
+| `abstol`            | Float64 | 1e-7     | Absolute tolerance                            |
+| `reltol`            | Float64 | 1e-7     | Relative tolerance                            |
+| `abstol_inacc`      | Float64 | 1e-5     | Absolute tolerance (inaccurate)               |
+| `reltol_inacc`      | Float64 | 1e-5     | Relative tolerance (inaccurate)               |
+| `verbose`           | Bool    | false    | Print solver output                           |
+
+† `kkt_static_reg_P` is the one setting where QOCO.jl does not use QOCO's own
+default, which is `1e-13`. When the objective has no quadratic term, the (1,1)
+block of the KKT system is exactly this regularization and nothing else, so on
+problems whose constraints are also rank deficient the KKT matrix becomes
+numerically singular: the primal residual stops improving while the duality gap
+keeps shrinking, and the solve returns `MOI.NUMERICAL_ERROR` even though the
+objective is correct. QOCO.jl restores the pre-0.3.0 value of `1e-8`, which
+repairs those cases and leaves well-conditioned problems unchanged. Set the
+attribute explicitly to override this, or read `QOCO.c_default_settings()` for
+QOCO's unmodified values.
 
 `MOI.Silent()` takes precedence over the raw `verbose` setting. By default, the
 wrapper uses QOCO's compiled default (`verbose = false`). To enable solver
