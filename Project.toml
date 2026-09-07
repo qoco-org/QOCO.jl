@@ -1,6 +1,6 @@
 name = "QOCO"
 uuid = "1ad68de0-b06d-4445-a3a7-148f250ed1fe"
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -11,7 +11,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 [compat]
 JuMP = "1"
 MathOptInterface = "1"
-QOCO_jll = "0.1.6"
+QOCO_jll = "0.3.2"
 julia = "1.6"
 
 [extras]

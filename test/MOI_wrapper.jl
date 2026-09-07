@@ -7,7 +7,7 @@ using JuMP
     @testset "Solver attributes" begin
         opt = QOCO.Optimizer()
         @test MOI.get(opt, MOI.SolverName()) == "QOCO"
-        @test MOI.get(opt, MOI.SolverVersion()) == "0.1.6"
+        @test MOI.get(opt, MOI.SolverVersion()) == "0.3.2"
         @test MOI.is_empty(opt)
     end
 
@@ -17,6 +17,32 @@ using JuMP
         @test MOI.get(opt, MOI.RawOptimizerAttribute("abstol")) == 1e-6
         MOI.set(opt, MOI.RawOptimizerAttribute("reltol"), 1e-8)
         @test MOI.get(opt, MOI.RawOptimizerAttribute("reltol")) == 1e-8
+
+        # Settings introduced in QOCO 0.3.
+        for name in (
+            "max_ir_iters", "ir_tol",
+            "kkt_static_reg_P", "kkt_static_reg_A", "kkt_static_reg_G",
+        )
+            @test MOI.supports(opt, MOI.RawOptimizerAttribute(name))
+        end
+        @test MOI.get(opt, MOI.RawOptimizerAttribute("max_ir_iters")) == 5
+
+        # The wrapper's overridden default is what gets reported, and an
+        # explicit value still takes precedence over it.
+        @test MOI.get(opt, MOI.RawOptimizerAttribute("kkt_static_reg_P")) ==
+              QOCO.SETTING_OVERRIDES.kkt_static_reg_P
+        MOI.set(opt, MOI.RawOptimizerAttribute("kkt_static_reg_P"), 1e-12)
+        @test MOI.get(opt, MOI.RawOptimizerAttribute("kkt_static_reg_P")) == 1e-12
+
+        MOI.set(opt, MOI.RawOptimizerAttribute("ir_tol"), 1e-9)
+        @test MOI.get(opt, MOI.RawOptimizerAttribute("ir_tol")) == 1e-9
+        MOI.set(opt, MOI.RawOptimizerAttribute("kkt_static_reg_A"), 1e-7)
+        @test MOI.get(opt, MOI.RawOptimizerAttribute("kkt_static_reg_A")) == 1e-7
+
+        # Settings that QOCO 0.1.6 had but 0.3 removed.
+        for name in ("bisect_iters", "iter_ref_iters", "kkt_static_reg")
+            @test !MOI.supports(opt, MOI.RawOptimizerAttribute(name))
+        end
     end
 
     @testset "Silent" begin
@@ -153,6 +179,83 @@ using JuMP
         @test x1_val ≈ 0.5 atol = 1e-5
         @test x2_val ≈ 0.5 atol = 1e-5
         @test MOI.get(opt, MOI.ObjectiveValue()) ≈ -0.5 atol = 1e-5
+
+        # Statistics that QOCO 0.3 added.
+        @test MOI.get(opt, QOCO.IterativeRefinementIterations()) >= 0
+        @test MOI.get(opt, QOCO.AnalysisTimeSec()) >= 0.0
+    end
+
+    @testset "Warm start via VariablePrimalStart" begin
+        # Same QP as "Simple QP via MOI", solved from a supplied starting point.
+        opt = QOCO.Optimizer()
+        MOI.set(opt, MOI.Silent(), true)
+        @test MOI.supports(opt, MOI.VariablePrimalStart(), MOI.VariableIndex)
+
+        # UniversalFallback so the source model can hold VariablePrimalStart.
+        model = MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}())
+        x = MOI.add_variables(model, 2)
+        obj = MOI.ScalarQuadraticFunction(
+            [
+                MOI.ScalarQuadraticTerm(2.0, x[1], x[1]),
+                MOI.ScalarQuadraticTerm(2.0, x[2], x[2]),
+            ],
+            [
+                MOI.ScalarAffineTerm(-1.0, x[1]),
+                MOI.ScalarAffineTerm(-1.0, x[2]),
+            ],
+            0.0,
+        )
+        MOI.set(model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+        MOI.set(model, MOI.ObjectiveFunction{typeof(obj)}(), obj)
+        MOI.add_constraint(
+            model,
+            MOI.VectorAffineFunction(
+                [
+                    MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
+                    MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[2])),
+                ],
+                [-1.0],
+            ),
+            MOI.Zeros(1),
+        )
+        MOI.add_constraint(
+            model,
+            MOI.VectorAffineFunction(
+                [
+                    MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
+                    MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(1.0, x[2])),
+                ],
+                [0.0, 0.0],
+            ),
+            MOI.Nonnegatives(2),
+        )
+
+        # Start only x[1]; x[2] falls back to zero.
+        MOI.set(model, MOI.VariablePrimalStart(), x[1], 0.4)
+
+        idxmap = MOI.copy_to(opt, model)
+        @test MOI.get(opt, MOI.VariablePrimalStart(), idxmap[x[1]]) == 0.4
+        @test MOI.get(opt, MOI.VariablePrimalStart(), idxmap[x[2]]) === nothing
+        @test MOI.VariablePrimalStart() in
+              MOI.get(opt, MOI.ListOfVariableAttributesSet())
+        @test MOI.get(
+            opt,
+            MOI.ListOfVariablesWithAttributeSet(MOI.VariablePrimalStart()),
+        ) == [idxmap[x[1]]]
+
+        MOI.optimize!(opt)
+
+        @test MOI.get(opt, MOI.TerminationStatus()) == MOI.OPTIMAL
+        @test MOI.get(opt, MOI.VariablePrimal(), idxmap[x[1]]) ≈ 0.5 atol = 1e-5
+        @test MOI.get(opt, MOI.VariablePrimal(), idxmap[x[2]]) ≈ 0.5 atol = 1e-5
+        @test MOI.get(opt, MOI.ObjectiveValue()) ≈ -0.5 atol = 1e-5
+
+        # Clearing the start returns the optimizer to default initialisation.
+        MOI.set(opt, MOI.VariablePrimalStart(), idxmap[x[1]], nothing)
+        @test MOI.get(opt, MOI.VariablePrimalStart(), idxmap[x[1]]) === nothing
+        @test isempty(MOI.get(opt, MOI.ListOfVariableAttributesSet()))
+        MOI.optimize!(opt)
+        @test MOI.get(opt, MOI.TerminationStatus()) == MOI.OPTIMAL
     end
 
     @testset "Linear objective with SOC via MOI" begin

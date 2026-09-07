@@ -24,6 +24,8 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
 
     n::Int
     variable_names::Vector{String}
+    x0::Vector{Union{Nothing, QOCOFloat}}
+    x0_set::Bool
     objective::SupportedObjectiveFunction
     sense::MOI.OptimizationSense
     P_colptr::Vector{QOCOInt}
@@ -83,7 +85,9 @@ mutable struct Optimizer <: MOI.AbstractOptimizer
     dual_obj_val::Float64
     solve_time::Float64
     setup_time::Float64
+    analysis_time::Float64
     iterations::Int
+    ir_iterations::Int
     pres::Float64
     dres::Float64
     gap::Float64
@@ -103,6 +107,8 @@ function Optimizer(; kwargs...)
         false,
         0,
         String[],
+        Union{Nothing, QOCOFloat}[],
+        false,
         _zero_objective(),
         MOI.FEASIBILITY_SENSE,
         QOCOInt[],
@@ -153,14 +159,16 @@ function Optimizer(; kwargs...)
         Float64[],
         Float64[],
         Float64[],
-        NaN,
-        NaN,
-        NaN,
-        NaN,
-        0,
-        NaN,
-        NaN,
-        NaN,
+        NaN,   # obj_val
+        NaN,   # dual_obj_val
+        NaN,   # solve_time
+        NaN,   # setup_time
+        NaN,   # analysis_time
+        0,     # iterations
+        0,     # ir_iterations
+        NaN,   # pres
+        NaN,   # dres
+        NaN,   # gap
     )
     for (key, value) in kwargs
         MOI.set(opt, MOI.RawOptimizerAttribute(String(key)), value)
@@ -196,7 +204,9 @@ function _reset_results!(opt::Optimizer)
     opt.dual_obj_val = NaN
     opt.solve_time = NaN
     opt.setup_time = NaN
+    opt.analysis_time = NaN
     opt.iterations = 0
+    opt.ir_iterations = 0
     opt.pres = NaN
     opt.dres = NaN
     opt.gap = NaN
@@ -215,6 +225,8 @@ function MOI.empty!(opt::Optimizer)
 
     opt.n = 0
     opt.variable_names = String[]
+    opt.x0 = Union{Nothing, QOCOFloat}[]
+    opt.x0_set = false
     opt.objective = _zero_objective()
     opt.sense = MOI.FEASIBILITY_SENSE
     opt.P_colptr = QOCOInt[]
@@ -264,7 +276,7 @@ function MOI.empty!(opt::Optimizer)
 end
 
 MOI.get(::Optimizer, ::MOI.SolverName) = "QOCO"
-MOI.get(::Optimizer, ::MOI.SolverVersion) = "0.1.6"
+MOI.get(::Optimizer, ::MOI.SolverVersion) = "0.3.2"
 MOI.get(opt::Optimizer, ::MOI.RawSolver) = opt
 
 MOI.supports(::Optimizer, ::MOI.Name) = true
@@ -287,17 +299,19 @@ end
 MOI.supports(::Optimizer, ::MOI.TimeLimitSec) = false
 
 const _SETTINGS_FIELDS = Dict{String, Tuple{Symbol, Type}}(
-    "max_iters"       => (:max_iters, Int),
-    "bisect_iters"    => (:bisect_iters, Int),
-    "ruiz_iters"      => (:ruiz_iters, Int),
-    "iter_ref_iters"  => (:iter_ref_iters, Int),
-    "kkt_static_reg"  => (:kkt_static_reg, Float64),
-    "kkt_dynamic_reg" => (:kkt_dynamic_reg, Float64),
-    "abstol"          => (:abstol, Float64),
-    "reltol"          => (:reltol, Float64),
-    "abstol_inacc"    => (:abstol_inacc, Float64),
-    "reltol_inacc"    => (:reltol_inacc, Float64),
-    "verbose"         => (:verbose, Bool),
+    "max_iters"         => (:max_iters, Int),
+    "ruiz_iters"        => (:ruiz_iters, Int),
+    "max_ir_iters"      => (:max_ir_iters, Int),
+    "ir_tol"            => (:ir_tol, Float64),
+    "kkt_static_reg_P"  => (:kkt_static_reg_P, Float64),
+    "kkt_static_reg_A"  => (:kkt_static_reg_A, Float64),
+    "kkt_static_reg_G"  => (:kkt_static_reg_G, Float64),
+    "kkt_dynamic_reg"   => (:kkt_dynamic_reg, Float64),
+    "abstol"            => (:abstol, Float64),
+    "reltol"            => (:reltol, Float64),
+    "abstol_inacc"      => (:abstol_inacc, Float64),
+    "reltol_inacc"      => (:reltol_inacc, Float64),
+    "verbose"           => (:verbose, Bool),
 )
 
 function _default_setting_value(key::Symbol)
@@ -348,6 +362,10 @@ end
 
 MOI.supports(::Optimizer, ::MOI.VariableName, ::Type{MOI.VariableIndex}) = true
 MOI.supports(::Optimizer, ::MOI.ConstraintName, ::Type{<:MOI.ConstraintIndex}) = true
+
+# QOCO 0.3 exposes `qoco_set_x0`, which takes a full-length primal starting
+# point. Variables left unset default to zero.
+MOI.supports(::Optimizer, ::MOI.VariablePrimalStart, ::Type{MOI.VariableIndex}) = true
 
 function MOI.supports_constraint(
     ::Optimizer,
@@ -456,10 +474,10 @@ function MOI.get(opt::Optimizer, ::MOI.ListOfVariableIndices)
 end
 
 function MOI.get(opt::Optimizer, ::MOI.ListOfVariableAttributesSet)
-    if opt.variable_names_set
-        return MOI.AbstractVariableAttribute[MOI.VariableName()]
-    end
-    return MOI.AbstractVariableAttribute[]
+    attrs = MOI.AbstractVariableAttribute[]
+    opt.variable_names_set && push!(attrs, MOI.VariableName())
+    opt.x0_set && push!(attrs, MOI.VariablePrimalStart())
+    return attrs
 end
 
 function MOI.get(
@@ -469,6 +487,16 @@ function MOI.get(
     return [
         MOI.VariableIndex(i) for i in eachindex(opt.variable_names)
         if !isempty(opt.variable_names[i])
+    ]
+end
+
+function MOI.get(
+    opt::Optimizer,
+    ::MOI.ListOfVariablesWithAttributeSet{MOI.VariablePrimalStart},
+)
+    return [
+        MOI.VariableIndex(i) for i in eachindex(opt.x0)
+        if opt.x0[i] !== nothing
     ]
 end
 
@@ -616,6 +644,41 @@ end
 function MOI.get(opt::Optimizer, ::Type{MOI.VariableIndex}, name::String)
     idx = _lookup_unique_name(opt.variable_names, name)
     return idx === nothing ? nothing : MOI.VariableIndex(idx)
+end
+
+function MOI.get(
+    opt::Optimizer,
+    ::MOI.VariablePrimalStart,
+    vi::MOI.VariableIndex,
+)
+    _check_valid(opt, vi)
+    value = opt.x0[vi.value]
+    return value === nothing ? nothing : Float64(value)
+end
+
+function MOI.set(
+    opt::Optimizer,
+    ::MOI.VariablePrimalStart,
+    vi::MOI.VariableIndex,
+    value::Union{Nothing, Real},
+)
+    _check_valid(opt, vi)
+    opt.x0[vi.value] = value === nothing ? nothing : convert(QOCOFloat, value)
+    opt.x0_set = any(!isnothing, opt.x0)
+    return
+end
+
+"""
+    _primal_start(opt) -> Union{Vector{QOCOFloat}, Nothing}
+
+Assemble the length-`n` starting point to hand to `qoco_set_x0!`, or `nothing`
+if no `MOI.VariablePrimalStart` was set. Variables without a start contribute
+`0.0`, since QOCO only accepts a full vector.
+"""
+function _primal_start(opt::Optimizer)
+    opt.x0_set || return nothing
+    length(opt.x0) == opt.n || return nothing
+    return QOCOFloat[value === nothing ? 0.0 : value for value in opt.x0]
 end
 
 function _constraint_name(
@@ -927,15 +990,32 @@ function _copy_variable_attributes!(
     vis,
     idxmap::MOI.Utilities.IndexMap,
 )
+    copy_names = false
+    copy_start = false
     for attr in MOI.get(src, MOI.ListOfVariableAttributesSet())
-        attr == MOI.VariableName() || throw(MOI.UnsupportedAttribute(attr))
-        opt.variable_names_set = true
+        if attr == MOI.VariableName()
+            copy_names = true
+        elseif attr == MOI.VariablePrimalStart()
+            copy_start = true
+        else
+            throw(MOI.UnsupportedAttribute(attr))
+        end
     end
-    if opt.variable_names_set
+    if copy_names
+        opt.variable_names_set = true
         for vi in vis
             mapped = idxmap[vi]
             opt.variable_names[mapped.value] = MOI.get(src, MOI.VariableName(), vi)
         end
+    end
+    if copy_start
+        for vi in vis
+            mapped = idxmap[vi]
+            value = MOI.get(src, MOI.VariablePrimalStart(), vi)
+            opt.x0[mapped.value] =
+                value === nothing ? nothing : convert(QOCOFloat, value)
+        end
+        opt.x0_set = any(!isnothing, opt.x0)
     end
     return
 end
@@ -1206,6 +1286,7 @@ function MOI.copy_to(opt::Optimizer, src::MOI.ModelLike)
     vis = MOI.get(src, MOI.ListOfVariableIndices())
     opt.n = length(vis)
     opt.variable_names = fill("", opt.n)
+    opt.x0 = Union{Nothing, QOCOFloat}[nothing for _ in 1:opt.n]
     for (i, vi) in enumerate(vis)
         idxmap[vi] = MOI.VariableIndex(i)
     end
@@ -1268,7 +1349,9 @@ function _set_setup_error!(opt::Optimizer, code::QOCOInt)
     opt.dual_obj_val = NaN
     opt.solve_time = 0.0
     opt.setup_time = 0.0
+    opt.analysis_time = 0.0
     opt.iterations = 0
+    opt.ir_iterations = 0
     opt.pres = NaN
     opt.dres = NaN
     opt.gap = NaN
@@ -1350,7 +1433,9 @@ function _solve_constant_model!(opt::Optimizer)
     feasible = _constant_model_feasible(opt)
     opt.solve_time = 0.0
     opt.setup_time = 0.0
+    opt.analysis_time = 0.0
     opt.iterations = 0
+    opt.ir_iterations = 0
     opt.pres = 0.0
     opt.dres = 0.0
     opt.gap = 0.0
@@ -1397,7 +1482,9 @@ function _store_solution!(opt::Optimizer, sol::QOCOSolution)
     opt.slack_cone = opt.m > 0 ? copy(unsafe_wrap(Array, sol.s, opt.m)) : Float64[]
     opt.solve_time = sol.solve_time_sec
     opt.setup_time = sol.setup_time_sec
+    opt.analysis_time = sol.analysis_time_sec
     opt.iterations = Int(sol.iters)
+    opt.ir_iterations = Int(sol.ir_iters)
     opt.pres = sol.pres
     opt.dres = sol.dres
     opt.gap = sol.gap
@@ -1449,7 +1536,10 @@ function MOI.optimize!(opt::Optimizer)
     q_vec = isempty(opt.q) ? QOCOInt[0] : opt.q
 
     solver_ptr = qoco_solver_alloc()
-    err = qoco_setup!(
+    # The CSC structs hold bare pointers into these arrays, so they are not
+    # reachable from the `qoco_setup` call itself and must be rooted explicitly
+    # for its duration.
+    err = GC.@preserve P_values P_rows A_values A_rows G_values G_rows qoco_setup!(
         solver_ptr,
         opt.n,
         opt.m,
@@ -1472,6 +1562,10 @@ function MOI.optimize!(opt::Optimizer)
     end
 
     try
+        x0 = _primal_start(opt)
+        if x0 !== nothing
+            qoco_set_x0!(solver_ptr, x0)
+        end
         qoco_solve!(solver_ptr)
         _store_solution!(opt, get_solution(solver_ptr))
     finally
@@ -1525,6 +1619,35 @@ end
 
 function MOI.get(opt::Optimizer, ::MOI.BarrierIterations)
     return Int64(opt.iterations)
+end
+
+"""
+    QOCO.AnalysisTimeSec()
+
+Model attribute for the time, in seconds, that the linear system backend spent
+in its symbolic analysis phase. Reported by QOCO 0.3 and later; it is part of
+the setup time rather than additional to it.
+"""
+struct AnalysisTimeSec <: MOI.AbstractModelAttribute end
+
+MOI.is_set_by_optimize(::AnalysisTimeSec) = true
+
+function MOI.get(opt::Optimizer, ::AnalysisTimeSec)
+    return opt.has_result ? opt.analysis_time : 0.0
+end
+
+"""
+    QOCO.IterativeRefinementIterations()
+
+Model attribute for the total number of iterative refinement iterations taken
+across all interior point steps. Reported by QOCO 0.3 and later.
+"""
+struct IterativeRefinementIterations <: MOI.AbstractModelAttribute end
+
+MOI.is_set_by_optimize(::IterativeRefinementIterations) = true
+
+function MOI.get(opt::Optimizer, ::IterativeRefinementIterations)
+    return Int64(opt.ir_iterations)
 end
 
 function MOI.get(opt::Optimizer, attr::MOI.VariablePrimal, vi::MOI.VariableIndex)
